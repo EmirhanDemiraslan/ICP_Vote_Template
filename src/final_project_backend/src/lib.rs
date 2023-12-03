@@ -16,7 +16,7 @@ enum Choice {
 
 #[derive(Debug, CandidType, Deserialize)]
 enum VoteError {
-    AlreadyVote,
+    AlreadyVoted,
     ProposalIsNotActive,
     NoSuchProposal,
     AccessRejected,
@@ -58,7 +58,7 @@ impl BoundedStorable for Proposal {
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> = RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
 
-    static PROPOSAL_MAP: RefCell<StableBTreeMap<u64, Proposal, Memory>> = RefCell::new(StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(0))));
+    static PROPOSAL_MAP: RefCell<StableBTreeMap<u64, Proposal, Memory>> = RefCell::new(StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(0)))));
 }
 
 #[ic_cdk::query]
@@ -73,7 +73,7 @@ fn get_proposal_count() -> u64 {
 
 #[ic_cdk::update]
 fn create_proposal(key: u64, proposal: CreateProposal) -> Option<Proposal> {
-    let value: = Proposal {
+    let value = Proposal {
         description: proposal.description,
         approve: 0u32,
         pass: 0u32,
@@ -89,12 +89,95 @@ fn create_proposal(key: u64, proposal: CreateProposal) -> Option<Proposal> {
 #[ic_cdk::update]
 fn edit_proposal(key: u64, proposal: CreateProposal) -> Result<(), VoteError> {
     PROPOSAL_MAP.with(|p| {
-        let old_proposal_opt: Option<Proposal> = p.borrow().get(key)
+        let old_proposal_opt = p.borrow().get(&key);
+        let old_proposal: Proposal;
+
+        match old_proposal_opt {
+            Some(value) => old_proposal = value; 
+            None => return Err(VoteError::NoSuchProposal)
+        }
+
+        if old_proposal.owner != ic_cdk::caller() {
+            return Err(VoteError::AccessRejected);
+        }
+
+        let value: Proposal {
+            description: proposal.description,
+            approve: old_proposal.approve,
+            reject: old_proposal.reject,
+            pass: old_proposal.pass,
+            is_active: proposal.is_active,
+            voted: old_proposal.voted,
+            owner: old_proposal.owner
+        };
+
+        let res = p.borrow_mut().insert(key, value);
+
+        match res {
+            Some(_) => Ok (()),
+            None => Err(VoteError::UpdateError)
+        }
     })
 }
 
 #[ic_cdk::update]
-fn end_proposal(key: u64) -> Result<(), VoteError> {}
+fn end_proposal(key: u64) -> Result<(), VoteError> {
+    PROPOSAL_MAP.with(|p| {
+        let old_proposal_opt = p.borrow().get(&key);
+        let mut old_proposal: Proposal;
+
+        match old_proposal_opt {
+            Some(value) => old_proposal = value; 
+            None => return Err(VoteError::NoSuchProposal)
+        }
+
+        if old_proposal.owner != ic_cdk::caller() {
+            return Err(VoteError::AccessRejected);
+        }
+
+        old_proposal.is_active = false;
+
+        let res = p.borrow_mut().insert(key, old_proposal);
+
+        match res {
+            Some(_) => Ok (()),
+            None => Err(VoteError::UpdateError)
+        }
+    })
+}
 
 #[ic_cdk::update]
-fn vote(key: u64, choice: Choice) -> Result<(), VoteError> {}
+fn vote(key: u64, choice: Choice) -> Result<(), VoteError> {
+    PROPOSAL_MAP.with(|p| {
+        let proposal_opt = p.borrow().get(&key);
+        let mut proposal: Proposal;
+
+        match proposal_opt {
+            Some(value) => proposal = value; 
+            None => return Err(VoteError::NoSuchProposal)
+        }
+
+        let caller = ic_cdk::caller();
+
+        if proposal.voted.contains(&caller) {
+            return Err(VoteError::AlreadyVoted);
+        } else if !proposal.is_active {
+            return Err(VoteError::ProposalIsNotActive);
+        }
+
+        match Choice {
+            Choice::Approve => proposal.approve += 1,
+            Choice::Pass => proposal.pass -= 1,
+            Choice::Reject => proposal.reject += 1
+        }
+
+        proposal.voted.push(caller);
+
+        let res = p.borrow_mut().insert(key, proposal);
+
+        match res {
+            Some(_) => Ok(()),
+            None => Err(VoteError::UpdateError)
+        }
+    })
+}
